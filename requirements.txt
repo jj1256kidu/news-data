@@ -8,4 +8,5 @@ python-dotenv==1.0.0
 googlesearch-python==1.2.3
 schedule==1.2.0
 lxml==4.9.3
-lxml-html-clean==0.1.0 
+lxml-html-clean==0.1.0
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz 
