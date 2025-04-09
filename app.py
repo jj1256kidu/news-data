@@ -9,12 +9,16 @@ from googlesearch import search
 import pandas as pd
 import time
 from urllib.parse import quote_plus
-from flask import Flask, render_template, jsonify, request
+import streamlit as st
 import threading
 import schedule
 
 # Load spaCy model
-nlp = spacy.load("en_core_web_sm")
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    st.error("Please install the spaCy English language model by running: python -m spacy download en_core_web_sm")
+    st.stop()
 
 class MedTechNewsScraper:
     def __init__(self):
@@ -45,7 +49,7 @@ class MedTechNewsScraper:
             articles = []
             for item in items[:num_results]:
                 try:
-                    pub_date = datetime.strptime(item.pubDate.text, '%a, %d %b %Y %H:%M:%S %z')
+                    pub_date = datetime.strptime(item.pubDate.text, '%a, %d %b %b %Y %H:%M:%S %z')
                     if datetime.now(pub_date.tzinfo) - pub_date <= timedelta(days=1):
                         article = {
                             'title': item.title.text,
@@ -55,12 +59,12 @@ class MedTechNewsScraper:
                         }
                         articles.append(article)
                 except Exception as e:
-                    print(f"Error processing article: {e}")
+                    st.warning(f"Error processing article: {e}")
                     continue
             
             return articles
         except Exception as e:
-            print(f"Error scraping Google News: {e}")
+            st.error(f"Error scraping Google News: {e}")
             return []
     
     def extract_article_content(self, url):
@@ -80,7 +84,7 @@ class MedTechNewsScraper:
                 if attempt < max_retries - 1:
                     time.sleep(1)
                     continue
-                print(f"Error extracting article content: {e}")
+                st.warning(f"Error extracting article content: {e}")
                 return None
     
     def extract_entities(self, text):
@@ -133,7 +137,7 @@ class MedTechNewsScraper:
             results = list(search(query, num_results=1, stop=1))
             return results[0] if results else None
         except Exception as e:
-            print(f"Error finding LinkedIn profile: {e}")
+            st.warning(f"Error finding LinkedIn profile: {e}")
             return None
     
     def detect_emerging_companies(self, entities):
@@ -190,22 +194,25 @@ class MedTechNewsScraper:
         ]
         
         all_results = []
-        for query in queries:
-            print(f"Processing query: {query}")
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, query in enumerate(queries):
+            status_text.text(f"Processing query: {query}")
             articles = self.scrape_google_news(query)
-            for article in articles:
-                print(f"Processing article: {article['title']}")
+            
+            for j, article in enumerate(articles):
+                status_text.text(f"Processing article: {article['title']}")
                 result = self.process_article(article['link'])
                 if result:
                     result['article_info'] = article
                     all_results.append(result)
                 time.sleep(1)
+                progress_bar.progress((i * len(articles) + j + 1) / (len(queries) * len(articles)))
         
         self.save_results(all_results)
-
-# Initialize Flask app and scraper
-app = Flask(__name__)
-scraper = MedTechNewsScraper()
+        status_text.text("Scraping completed!")
+        progress_bar.empty()
 
 def load_news_data():
     try:
@@ -220,57 +227,96 @@ def run_scheduled_scraper():
         schedule.run_pending()
         time.sleep(60)
 
-# Schedule scraper to run every 6 hours
-schedule.every(6).hours.do(scraper.run_scraper)
+# Initialize scraper
+scraper = MedTechNewsScraper()
+
+# Streamlit UI
+st.set_page_config(page_title="MedTech News Dashboard", layout="wide")
+st.title("MedTech News Dashboard")
+
+# Sidebar controls
+with st.sidebar:
+    st.header("Controls")
+    if st.button("Refresh Data"):
+        scraper.run_scraper()
+    
+    st.header("Filters")
+    start_date = st.date_input("Start Date")
+    end_date = st.date_input("End Date")
+    company_filter = st.text_input("Filter by Company")
+
+# Load and filter data
+data = load_news_data()
+articles = data.get('articles', [])
+
+if start_date and end_date:
+    articles = [item for item in articles if 
+                start_date <= datetime.fromisoformat(item['article_info']['published_date']).date() <= end_date]
+
+if company_filter:
+    articles = [item for item in articles if 
+                any(company_filter.lower() in org.lower() for org in item['entities']['ORG'])]
+
+# Display articles
+for article in articles:
+    with st.container():
+        st.markdown(f"### {article['article_info']['title']}")
+        st.markdown(f"*Source: {article['article_info']['source']} - {datetime.fromisoformat(article['article_info']['published_date']).strftime('%Y-%m-%d %H:%M')}*")
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.markdown(f"[Read Article]({article['article_info']['link']})")
+            
+            if article['entities']['ORG']:
+                st.markdown("**Companies:**")
+                for org in article['entities']['ORG']:
+                    st.markdown(f"- {org}")
+            
+            if article['entities']['MONEY']:
+                st.markdown("**Funding:**")
+                for money in article['entities']['MONEY']:
+                    st.markdown(f"- {money}")
+            
+            if article['emerging_companies']:
+                st.markdown("**New Companies:**")
+                for company in article['emerging_companies']:
+                    st.markdown(f"- {company}")
+        
+        with col2:
+            if article['quotes']:
+                st.markdown("**Key Quotes:**")
+                for quote in article['quotes']:
+                    with st.expander(f"{quote['person']}"):
+                        st.markdown(f'"{quote["quote"]}"')
+                        if quote['linkedin_profile']:
+                            st.markdown(f"[LinkedIn Profile]({quote['linkedin_profile']})")
+        
+        st.markdown("---")
+
+# Export options
+st.sidebar.header("Export")
+if st.sidebar.button("Export to CSV"):
+    df = pd.json_normalize(articles)
+    csv = df.to_csv(index=False)
+    st.sidebar.download_button(
+        label="Download CSV",
+        data=csv,
+        file_name="medtech_news.csv",
+        mime="text/csv"
+    )
+
+if st.sidebar.button("Export to JSON"):
+    st.sidebar.download_button(
+        label="Download JSON",
+        data=json.dumps(articles, indent=2),
+        file_name="medtech_news.json",
+        mime="application/json"
+    )
 
 # Start the scheduler in a separate thread
 scheduler_thread = threading.Thread(target=run_scheduled_scraper)
 scheduler_thread.daemon = True
 scheduler_thread.start()
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/api/news')
-def get_news():
-    data = load_news_data()
-    
-    # Filter by date if provided
-    start_date = request.args.get('start_date')
-    end_date = request.args.get('end_date')
-    if start_date and end_date:
-        data['articles'] = [item for item in data['articles'] if 
-                start_date <= item['article_info']['published_date'] <= end_date]
-    
-    # Filter by company if provided
-    company = request.args.get('company')
-    if company:
-        data['articles'] = [item for item in data['articles'] if 
-                any(company.lower() in org.lower() for org in item['entities']['ORG'])]
-    
-    return jsonify(data)
-
-@app.route('/api/export')
-def export_data():
-    data = load_news_data()
-    format_type = request.args.get('format', 'json')
-    
-    if format_type == 'csv':
-        import pandas as pd
-        df = pd.json_normalize(data['articles'])
-        return df.to_csv(index=False)
-    else:
-        return jsonify(data)
-
-@app.route('/api/refresh')
-def refresh_data():
-    """Manual trigger to refresh the data"""
-    scraper.run_scraper()
-    return jsonify({'status': 'success', 'message': 'Data refreshed successfully'})
-
-if __name__ == '__main__':
-    # Run initial scrape
-    scraper.run_scraper()
-    # Start Flask app
-    app.run(debug=True) 
+# Schedule scraper to run every 6 hours
+schedule.every(6).hours.do(scraper.run_scraper) 
